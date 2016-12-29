@@ -21,11 +21,11 @@ func (_ *NetIOStats) Description() string {
 }
 
 var netSampleConfig = `
-  # By default, telegraf gathers stats from any up interface (excluding loopback)
-  # Setting interfaces will tell it to gather these explicit interfaces,
-  # regardless of status.
-  #
-  # interfaces = ["eth0", ... ]
+  ## By default, telegraf gathers stats from any up interface (excluding loopback)
+  ## Setting interfaces will tell it to gather these explicit interfaces,
+  ## regardless of status.
+  ##
+  # interfaces = ["eth0"]
 `
 
 func (_ *NetIOStats) SampleConfig() string {
@@ -81,7 +81,7 @@ func (s *NetIOStats) Gather(acc telegraf.Accumulator) error {
 			"drop_in":      io.Dropin,
 			"drop_out":     io.Dropout,
 		}
-		acc.AddFields("net", fields, tags)
+		acc.AddCounter("net", fields, tags)
 	}
 
 	// Get system wide stats for different network protocols

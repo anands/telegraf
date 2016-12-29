@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/internal/errchan"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
@@ -19,10 +20,8 @@ type Memcached struct {
 }
 
 var sampleConfig = `
-  # An array of address to gather stats about. Specify an ip on hostname
-  # with optional port. ie localhost, 10.0.0.1:11211, etc.
-  #
-  # If no servers are specified, then localhost is used as the host.
+  ## An array of address to gather stats about. Specify an ip on hostname
+  ## with optional port. ie localhost, 10.0.0.1:11211, etc.
   servers = ["localhost:11211"]
   # unix_sockets = ["/var/run/memcached.sock"]
 `
@@ -75,19 +74,16 @@ func (m *Memcached) Gather(acc telegraf.Accumulator) error {
 		return m.gatherServer(":11211", false, acc)
 	}
 
+	errChan := errchan.New(len(m.Servers) + len(m.UnixSockets))
 	for _, serverAddress := range m.Servers {
-		if err := m.gatherServer(serverAddress, false, acc); err != nil {
-			return err
-		}
+		errChan.C <- m.gatherServer(serverAddress, false, acc)
 	}
 
 	for _, unixAddress := range m.UnixSockets {
-		if err := m.gatherServer(unixAddress, true, acc); err != nil {
-			return err
-		}
+		errChan.C <- m.gatherServer(unixAddress, true, acc)
 	}
 
-	return nil
+	return errChan.Error()
 }
 
 func (m *Memcached) gatherServer(
@@ -96,14 +92,15 @@ func (m *Memcached) gatherServer(
 	acc telegraf.Accumulator,
 ) error {
 	var conn net.Conn
+	var err error
 	if unix {
-		conn, err := net.DialTimeout("unix", address, defaultTimeout)
+		conn, err = net.DialTimeout("unix", address, defaultTimeout)
 		if err != nil {
 			return err
 		}
 		defer conn.Close()
 	} else {
-		_, _, err := net.SplitHostPort(address)
+		_, _, err = net.SplitHostPort(address)
 		if err != nil {
 			address = address + ":11211"
 		}
@@ -113,6 +110,10 @@ func (m *Memcached) gatherServer(
 			return err
 		}
 		defer conn.Close()
+	}
+
+	if conn == nil {
+		return fmt.Errorf("Failed to create net connection")
 	}
 
 	// Extend connection

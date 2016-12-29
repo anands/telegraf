@@ -20,11 +20,11 @@ type Zookeeper struct {
 }
 
 var sampleConfig = `
-  # An array of address to gather stats about. Specify an ip or hostname
-  # with port. ie localhost:2181, 10.0.0.1:2181, etc.
+  ## An array of address to gather stats about. Specify an ip or hostname
+  ## with port. ie localhost:2181, 10.0.0.1:2181, etc.
 
-  # If no servers are specified, then localhost is used as the host.
-  # If no port is specified, 2181 is used
+  ## If no servers are specified, then localhost is used as the host.
+  ## If no port is specified, 2181 is used
   servers = [":2181"]
 `
 
@@ -55,6 +55,7 @@ func (z *Zookeeper) Gather(acc telegraf.Accumulator) error {
 }
 
 func (z *Zookeeper) gatherServer(address string, acc telegraf.Accumulator) error {
+	var zookeeper_state string
 	_, _, err := net.SplitHostPort(address)
 	if err != nil {
 		address = address + ":2181"
@@ -67,6 +68,9 @@ func (z *Zookeeper) gatherServer(address string, acc telegraf.Accumulator) error
 	}
 	defer c.Close()
 
+	// Extend connection
+	c.SetDeadline(time.Now().Add(defaultTimeout))
+
 	fmt.Fprintf(c, "%s\n", "mntr")
 	rdr := bufio.NewReader(c)
 	scanner := bufio.NewScanner(rdr)
@@ -75,7 +79,6 @@ func (z *Zookeeper) gatherServer(address string, acc telegraf.Accumulator) error
 	if len(service) != 2 {
 		return fmt.Errorf("Invalid service address: %s", address)
 	}
-	tags := map[string]string{"server": service[0], "port": service[1]}
 
 	fields := make(map[string]interface{})
 	for scanner.Scan() {
@@ -89,14 +92,23 @@ func (z *Zookeeper) gatherServer(address string, acc telegraf.Accumulator) error
 		}
 
 		measurement := strings.TrimPrefix(parts[1], "zk_")
-		sValue := string(parts[2])
-
-		iVal, err := strconv.ParseInt(sValue, 10, 64)
-		if err == nil {
-			fields[measurement] = iVal
+		if measurement == "server_state" {
+			zookeeper_state = parts[2]
 		} else {
-			fields[measurement] = sValue
+			sValue := string(parts[2])
+
+			iVal, err := strconv.ParseInt(sValue, 10, 64)
+			if err == nil {
+				fields[measurement] = iVal
+			} else {
+				fields[measurement] = sValue
+			}
 		}
+	}
+	tags := map[string]string{
+		"server": service[0],
+		"port":   service[1],
+		"state":  zookeeper_state,
 	}
 	acc.AddFields("zookeeper", fields, tags)
 

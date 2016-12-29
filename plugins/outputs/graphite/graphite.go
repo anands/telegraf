@@ -2,31 +2,36 @@ package graphite
 
 import (
 	"errors"
-	"fmt"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/outputs"
 	"log"
 	"math/rand"
 	"net"
-	"sort"
-	"strings"
 	"time"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/outputs"
+	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 type Graphite struct {
 	// URL is only for backwards compatability
-	Servers []string
-	Prefix  string
-	Timeout int
-	conns   []net.Conn
+	Servers  []string
+	Prefix   string
+	Template string
+	Timeout  int
+	conns    []net.Conn
 }
 
 var sampleConfig = `
-  ### TCP endpoint for your graphite instance.
+  ## TCP endpoint for your graphite instance.
+  ## If multiple endpoints are configured, output will be load balanced.
+  ## Only one of the endpoints will be written to with each iteration.
   servers = ["localhost:2003"]
-  ### Prefix metrics name
+  ## Prefix metrics name
   prefix = ""
-  ### timeout in seconds for the write connection to graphite
+  ## Graphite output template
+  ## see https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
+  template = "host.tags.measurement.field"
+  ## timeout in seconds for the write connection to graphite
   timeout = 2
 `
 
@@ -70,50 +75,32 @@ func (g *Graphite) Description() string {
 // occurs, logging each unsuccessful. If all servers fail, return error.
 func (g *Graphite) Write(metrics []telegraf.Metric) error {
 	// Prepare data
-	var bp []string
-	for _, metric := range metrics {
-		// Get name
-		name := metric.Name()
-		// Convert UnixNano to Unix timestamps
-		timestamp := metric.UnixNano() / 1000000000
-		tag_str := buildTags(metric)
-
-		for field_name, value := range metric.Fields() {
-			// Convert value
-			value_str := fmt.Sprintf("%#v", value)
-			// Write graphite metric
-			var graphitePoint string
-			if name == field_name {
-				graphitePoint = fmt.Sprintf("%s.%s %s %d\n",
-					tag_str,
-					strings.Replace(name, ".", "_", -1),
-					value_str,
-					timestamp)
-			} else {
-				graphitePoint = fmt.Sprintf("%s.%s.%s %s %d\n",
-					tag_str,
-					strings.Replace(name, ".", "_", -1),
-					strings.Replace(field_name, ".", "_", -1),
-					value_str,
-					timestamp)
-			}
-			if g.Prefix != "" {
-				graphitePoint = fmt.Sprintf("%s.%s", g.Prefix, graphitePoint)
-			}
-			bp = append(bp, graphitePoint)
-		}
+	var batch []byte
+	s, err := serializers.NewGraphiteSerializer(g.Prefix, g.Template)
+	if err != nil {
+		return err
 	}
-	graphitePoints := strings.Join(bp, "")
+
+	for _, metric := range metrics {
+		buf, err := s.Serialize(metric)
+		if err != nil {
+			log.Printf("E! Error serializing some metrics to graphite: %s", err.Error())
+		}
+		batch = append(batch, buf...)
+	}
 
 	// This will get set to nil if a successful write occurs
-	err := errors.New("Could not write to any Graphite server in cluster\n")
+	err = errors.New("Could not write to any Graphite server in cluster\n")
 
 	// Send data to a random server
 	p := rand.Perm(len(g.conns))
 	for _, n := range p {
-		if _, e := fmt.Fprintf(g.conns[n], graphitePoints); e != nil {
+		if g.Timeout > 0 {
+			g.conns[n].SetWriteDeadline(time.Now().Add(time.Duration(g.Timeout) * time.Second))
+		}
+		if _, e := g.conns[n].Write(batch); e != nil {
 			// Error
-			log.Println("ERROR: " + err.Error())
+			log.Println("E! Graphite Error: " + e.Error())
 			// Let's try the next one
 		} else {
 			// Success
@@ -126,37 +113,6 @@ func (g *Graphite) Write(metrics []telegraf.Metric) error {
 		g.Connect()
 	}
 	return err
-}
-
-func buildTags(metric telegraf.Metric) string {
-	var keys []string
-	tags := metric.Tags()
-	for k := range tags {
-		if k == "host" {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var tag_str string
-	if host, ok := tags["host"]; ok {
-		if len(keys) > 0 {
-			tag_str = strings.Replace(host, ".", "_", -1) + "."
-		} else {
-			tag_str = strings.Replace(host, ".", "_", -1)
-		}
-	}
-
-	for i, k := range keys {
-		tag_value := strings.Replace(tags[k], ".", "_", -1)
-		if i == 0 {
-			tag_str += tag_value
-		} else {
-			tag_str += "." + tag_value
-		}
-	}
-	return tag_str
 }
 
 func init() {

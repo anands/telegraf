@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/internal/errchan"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
@@ -41,7 +42,7 @@ type NSQ struct {
 }
 
 var sampleConfig = `
-  # An array of NSQD HTTP API endpoints
+  ## An array of NSQD HTTP API endpoints
   endpoints = ["http://localhost:4151"]
 `
 
@@ -65,26 +66,27 @@ func (n *NSQ) Description() string {
 
 func (n *NSQ) Gather(acc telegraf.Accumulator) error {
 	var wg sync.WaitGroup
-	var outerr error
-
+	errChan := errchan.New(len(n.Endpoints))
 	for _, e := range n.Endpoints {
 		wg.Add(1)
 		go func(e string) {
 			defer wg.Done()
-			outerr = n.gatherEndpoint(e, acc)
+			errChan.C <- n.gatherEndpoint(e, acc)
 		}(e)
 	}
 
 	wg.Wait()
-
-	return outerr
+	return errChan.Error()
 }
 
 var tr = &http.Transport{
 	ResponseHeaderTimeout: time.Duration(3 * time.Second),
 }
 
-var client = &http.Client{Transport: tr}
+var client = &http.Client{
+	Transport: tr,
+	Timeout:   time.Duration(4 * time.Second),
+}
 
 func (n *NSQ) gatherEndpoint(e string, acc telegraf.Accumulator) error {
 	u, err := buildURL(e)

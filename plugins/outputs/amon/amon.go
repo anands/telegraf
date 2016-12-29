@@ -22,13 +22,13 @@ type Amon struct {
 }
 
 var sampleConfig = `
-  ### Amon Server Key
+  ## Amon Server Key
   server_key = "my-server-key" # required.
 
-  ### Amon Instance URL
+  ## Amon Instance URL
   amon_instance = "https://youramoninstance" # required
 
-  ### Connection timeout.
+  ## Connection timeout.
   # timeout = "5s"
 `
 
@@ -73,7 +73,7 @@ func (a *Amon) Write(metrics []telegraf.Metric) error {
 				metricCounter++
 			}
 		} else {
-			log.Printf("unable to build Metric for %s, skipping\n", m.Name())
+			log.Printf("I! unable to build Metric for %s, skipping\n", m.Name())
 		}
 	}
 

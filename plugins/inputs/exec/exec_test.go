@@ -1,8 +1,13 @@
 package exec
 
 import (
+	"bytes"
 	"fmt"
+	"runtime"
 	"testing"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/parsers"
 
 	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/assert"
@@ -31,7 +36,7 @@ const malformedJson = `
     "status": "green",
 `
 
-const lineProtocol = "cpu,host=foo,datacenter=us-east usage_idle=99,usage_busy=1"
+const lineProtocol = "cpu,host=foo,datacenter=us-east usage_idle=99,usage_busy=1\n"
 
 const lineProtocolMulti = `
 cpu,cpu=cpu0,host=foo,datacenter=us-east usage_idle=99,usage_busy=1
@@ -42,6 +47,29 @@ cpu,cpu=cpu4,host=foo,datacenter=us-east usage_idle=99,usage_busy=1
 cpu,cpu=cpu5,host=foo,datacenter=us-east usage_idle=99,usage_busy=1
 cpu,cpu=cpu6,host=foo,datacenter=us-east usage_idle=99,usage_busy=1
 `
+
+type CarriageReturnTest struct {
+	input  []byte
+	output []byte
+}
+
+var crTests = []CarriageReturnTest{
+	{[]byte{0x4c, 0x69, 0x6e, 0x65, 0x20, 0x31, 0x0d, 0x0a, 0x4c, 0x69,
+		0x6e, 0x65, 0x20, 0x32, 0x0d, 0x0a, 0x4c, 0x69, 0x6e, 0x65,
+		0x20, 0x33},
+		[]byte{0x4c, 0x69, 0x6e, 0x65, 0x20, 0x31, 0x0a, 0x4c, 0x69, 0x6e,
+			0x65, 0x20, 0x32, 0x0a, 0x4c, 0x69, 0x6e, 0x65, 0x20, 0x33}},
+	{[]byte{0x4c, 0x69, 0x6e, 0x65, 0x20, 0x31, 0x0a, 0x4c, 0x69, 0x6e,
+		0x65, 0x20, 0x32, 0x0a, 0x4c, 0x69, 0x6e, 0x65, 0x20, 0x33},
+		[]byte{0x4c, 0x69, 0x6e, 0x65, 0x20, 0x31, 0x0a, 0x4c, 0x69, 0x6e,
+			0x65, 0x20, 0x32, 0x0a, 0x4c, 0x69, 0x6e, 0x65, 0x20, 0x33}},
+	{[]byte{0x54, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x61, 0x6c,
+		0x6c, 0x20, 0x6f, 0x6e, 0x65, 0x20, 0x62, 0x69, 0x67, 0x20,
+		0x6c, 0x69, 0x6e, 0x65},
+		[]byte{0x54, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x61, 0x6c,
+			0x6c, 0x20, 0x6f, 0x6e, 0x65, 0x20, 0x62, 0x69, 0x67, 0x20,
+			0x6c, 0x69, 0x6e, 0x65}},
+}
 
 type runnerMock struct {
 	out []byte
@@ -55,7 +83,7 @@ func newRunnerMock(out []byte, err error) Runner {
 	}
 }
 
-func (r runnerMock) Run(e *Exec) ([]byte, error) {
+func (r runnerMock) Run(e *Exec, command string, acc telegraf.Accumulator) ([]byte, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -63,9 +91,11 @@ func (r runnerMock) Run(e *Exec) ([]byte, error) {
 }
 
 func TestExec(t *testing.T) {
+	parser, _ := parsers.NewJSONParser("exec", []string{}, nil)
 	e := &Exec{
-		runner:  newRunnerMock([]byte(validJson), nil),
-		Command: "testcommand arg1",
+		runner:   newRunnerMock([]byte(validJson), nil),
+		Commands: []string{"testcommand arg1"},
+		parser:   parser,
 	}
 
 	var acc testutil.Accumulator
@@ -87,9 +117,11 @@ func TestExec(t *testing.T) {
 }
 
 func TestExecMalformed(t *testing.T) {
+	parser, _ := parsers.NewJSONParser("exec", []string{}, nil)
 	e := &Exec{
-		runner:  newRunnerMock([]byte(malformedJson), nil),
-		Command: "badcommand arg1",
+		runner:   newRunnerMock([]byte(malformedJson), nil),
+		Commands: []string{"badcommand arg1"},
+		parser:   parser,
 	}
 
 	var acc testutil.Accumulator
@@ -99,9 +131,11 @@ func TestExecMalformed(t *testing.T) {
 }
 
 func TestCommandError(t *testing.T) {
+	parser, _ := parsers.NewJSONParser("exec", []string{}, nil)
 	e := &Exec{
-		runner:  newRunnerMock(nil, fmt.Errorf("exit status code 1")),
-		Command: "badcommand",
+		runner:   newRunnerMock(nil, fmt.Errorf("exit status code 1")),
+		Commands: []string{"badcommand"},
+		parser:   parser,
 	}
 
 	var acc testutil.Accumulator
@@ -111,10 +145,11 @@ func TestCommandError(t *testing.T) {
 }
 
 func TestLineProtocolParse(t *testing.T) {
+	parser, _ := parsers.NewInfluxParser()
 	e := &Exec{
-		runner:     newRunnerMock([]byte(lineProtocol), nil),
-		Command:    "line-protocol",
-		DataFormat: "influx",
+		runner:   newRunnerMock([]byte(lineProtocol), nil),
+		Commands: []string{"line-protocol"},
+		parser:   parser,
 	}
 
 	var acc testutil.Accumulator
@@ -133,10 +168,11 @@ func TestLineProtocolParse(t *testing.T) {
 }
 
 func TestLineProtocolParseMultiple(t *testing.T) {
+	parser, _ := parsers.NewInfluxParser()
 	e := &Exec{
-		runner:     newRunnerMock([]byte(lineProtocolMulti), nil),
-		Command:    "line-protocol",
-		DataFormat: "influx",
+		runner:   newRunnerMock([]byte(lineProtocolMulti), nil),
+		Commands: []string{"line-protocol"},
+		parser:   parser,
 	}
 
 	var acc testutil.Accumulator
@@ -159,14 +195,68 @@ func TestLineProtocolParseMultiple(t *testing.T) {
 	}
 }
 
-func TestInvalidDataFormat(t *testing.T) {
-	e := &Exec{
-		runner:     newRunnerMock([]byte(lineProtocol), nil),
-		Command:    "bad data format",
-		DataFormat: "FooBar",
-	}
+func TestExecCommandWithGlob(t *testing.T) {
+	parser, _ := parsers.NewValueParser("metric", "string", nil)
+	e := NewExec()
+	e.Commands = []string{"/bin/ech* metric_value"}
+	e.SetParser(parser)
 
 	var acc testutil.Accumulator
 	err := e.Gather(&acc)
-	require.Error(t, err)
+	require.NoError(t, err)
+
+	fields := map[string]interface{}{
+		"value": "metric_value",
+	}
+	acc.AssertContainsFields(t, "metric", fields)
+}
+
+func TestExecCommandWithoutGlob(t *testing.T) {
+	parser, _ := parsers.NewValueParser("metric", "string", nil)
+	e := NewExec()
+	e.Commands = []string{"/bin/echo metric_value"}
+	e.SetParser(parser)
+
+	var acc testutil.Accumulator
+	err := e.Gather(&acc)
+	require.NoError(t, err)
+
+	fields := map[string]interface{}{
+		"value": "metric_value",
+	}
+	acc.AssertContainsFields(t, "metric", fields)
+}
+
+func TestExecCommandWithoutGlobAndPath(t *testing.T) {
+	parser, _ := parsers.NewValueParser("metric", "string", nil)
+	e := NewExec()
+	e.Commands = []string{"echo metric_value"}
+	e.SetParser(parser)
+
+	var acc testutil.Accumulator
+	err := e.Gather(&acc)
+	require.NoError(t, err)
+
+	fields := map[string]interface{}{
+		"value": "metric_value",
+	}
+	acc.AssertContainsFields(t, "metric", fields)
+}
+
+func TestRemoveCarriageReturns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Test that all carriage returns are removed
+		for _, test := range crTests {
+			b := bytes.NewBuffer(test.input)
+			out := removeCarriageReturns(*b)
+			assert.True(t, bytes.Equal(test.output, out.Bytes()))
+		}
+	} else {
+		// Test that the buffer is returned unaltered
+		for _, test := range crTests {
+			b := bytes.NewBuffer(test.input)
+			out := removeCarriageReturns(*b)
+			assert.True(t, bytes.Equal(test.input, out.Bytes()))
+		}
+	}
 }

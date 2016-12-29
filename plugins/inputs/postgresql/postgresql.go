@@ -4,39 +4,49 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type Postgresql struct {
-	Address        string
-	Databases      []string
-	OrderedColumns []string
+	Address          string
+	Databases        []string
+	IgnoredDatabases []string
+	OrderedColumns   []string
+	AllColumns       []string
+	sanitizedAddress string
 }
 
 var ignoredColumns = map[string]bool{"datid": true, "datname": true, "stats_reset": true}
 
 var sampleConfig = `
-  # specify address via a url matching:
-  #   postgres://[pqgotest[:password]]@localhost[/dbname]?sslmode=[disable|verify-ca|verify-full]
-  # or a simple string:
-  #   host=localhost user=pqotest password=... sslmode=... dbname=app_production
-  #
-  # All connection parameters are optional.
-  #
-  # Without the dbname parameter, the driver will default to a database
-  # with the same name as the user. This dbname is just for instantiating a
-  # connection with the server and doesn't restrict the databases we are trying
-  # to grab metrics for.
-  #
+  ## specify address via a url matching:
+  ##   postgres://[pqgotest[:password]]@localhost[/dbname]\
+  ##       ?sslmode=[disable|verify-ca|verify-full]
+  ## or a simple string:
+  ##   host=localhost user=pqotest password=... sslmode=... dbname=app_production
+  ##
+  ## All connection parameters are optional.
+  ##
+  ## Without the dbname parameter, the driver will default to a database
+  ## with the same name as the user. This dbname is just for instantiating a
+  ## connection with the server and doesn't restrict the databases we are trying
+  ## to grab metrics for.
+  ##
   address = "host=localhost user=postgres sslmode=disable"
 
-  # A list of databases to pull metrics about. If not specified, metrics for all
-  # databases are gathered.
+  ## A  list of databases to explicitly ignore.  If not specified, metrics for all
+  ## databases are gathered.  Do NOT use with the 'databases' option.
+  # ignored_databases = ["postgres", "template0", "template1"]
+
+  ## A list of databases to pull metrics about. If not specified, metrics for all
+  ## databases are gathered.  Do NOT use with the 'ignore_databases' option.
   # databases = ["app_production", "testing"]
 `
 
@@ -68,8 +78,11 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 
 	defer db.Close()
 
-	if len(p.Databases) == 0 {
+	if len(p.Databases) == 0 && len(p.IgnoredDatabases) == 0 {
 		query = `SELECT * FROM pg_stat_database`
+	} else if len(p.IgnoredDatabases) != 0 {
+		query = fmt.Sprintf(`SELECT * FROM pg_stat_database WHERE datname NOT IN ('%s')`,
+			strings.Join(p.IgnoredDatabases, "','"))
 	} else {
 		query = fmt.Sprintf(`SELECT * FROM pg_stat_database WHERE datname IN ('%s')`,
 			strings.Join(p.Databases, "','"))
@@ -86,6 +99,9 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 	p.OrderedColumns, err = rows.Columns()
 	if err != nil {
 		return err
+	} else {
+		p.AllColumns = make([]string, len(p.OrderedColumns))
+		copy(p.AllColumns, p.OrderedColumns)
 	}
 
 	for rows.Next() {
@@ -94,12 +110,55 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 			return err
 		}
 	}
+	//return rows.Err()
+	query = `SELECT * FROM pg_stat_bgwriter`
 
-	return rows.Err()
+	bg_writer_row, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+
+	defer bg_writer_row.Close()
+
+	// grab the column information from the result
+	p.OrderedColumns, err = bg_writer_row.Columns()
+	if err != nil {
+		return err
+	} else {
+		for _, v := range p.OrderedColumns {
+			p.AllColumns = append(p.AllColumns, v)
+		}
+	}
+
+	for bg_writer_row.Next() {
+		err = p.accRow(bg_writer_row, acc)
+		if err != nil {
+			return err
+		}
+	}
+	sort.Strings(p.AllColumns)
+	return bg_writer_row.Err()
 }
 
 type scanner interface {
 	Scan(dest ...interface{}) error
+}
+
+var passwordKVMatcher, _ = regexp.Compile("password=\\S+ ?")
+
+func (p *Postgresql) SanitizedAddress() (_ string, err error) {
+	var canonicalizedAddress string
+	if strings.HasPrefix(p.Address, "postgres://") || strings.HasPrefix(p.Address, "postgresql://") {
+		canonicalizedAddress, err = pq.ParseURL(p.Address)
+		if err != nil {
+			return p.sanitizedAddress, err
+		}
+	} else {
+		canonicalizedAddress = p.Address
+	}
+	p.sanitizedAddress = passwordKVMatcher.ReplaceAllString(canonicalizedAddress, "")
+
+	return p.sanitizedAddress, err
 }
 
 func (p *Postgresql) accRow(row scanner, acc telegraf.Accumulator) error {
@@ -124,14 +183,23 @@ func (p *Postgresql) accRow(row scanner, acc telegraf.Accumulator) error {
 	if err != nil {
 		return err
 	}
-
-	// extract the database name from the column map
-	dbnameChars := (*columnMap["datname"]).([]uint8)
-	for i := 0; i < len(dbnameChars); i++ {
-		dbname.WriteString(string(dbnameChars[i]))
+	if columnMap["datname"] != nil {
+		// extract the database name from the column map
+		dbnameChars := (*columnMap["datname"]).([]uint8)
+		for i := 0; i < len(dbnameChars); i++ {
+			dbname.WriteString(string(dbnameChars[i]))
+		}
+	} else {
+		dbname.WriteString("postgres")
 	}
 
-	tags := map[string]string{"server": p.Address, "db": dbname.String()}
+	var tagAddress string
+	tagAddress, err = p.SanitizedAddress()
+	if err != nil {
+		return err
+	}
+
+	tags := map[string]string{"server": tagAddress, "db": dbname.String()}
 
 	fields := make(map[string]interface{})
 	for col, val := range columnMap {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -18,10 +19,8 @@ type Powerdns struct {
 }
 
 var sampleConfig = `
-  # An array of sockets to gather stats about.
-  # Specify a path to unix socket.
-  #
-  # If no servers are specified, then '/var/run/pdns.controlsocket' is used as the path.
+  ## An array of sockets to gather stats about.
+  ## Specify a path to unix socket.
   unix_sockets = ["/var/run/pdns.controlsocket"]
 `
 
@@ -88,10 +87,7 @@ func (p *Powerdns) gatherServer(address string, acc telegraf.Accumulator) error 
 	metrics := string(buf)
 
 	// Process data
-	fields, err := parseResponse(metrics)
-	if err != nil {
-		return err
-	}
+	fields := parseResponse(metrics)
 
 	// Add server socket as a tag
 	tags := map[string]string{"server": address}
@@ -101,22 +97,27 @@ func (p *Powerdns) gatherServer(address string, acc telegraf.Accumulator) error 
 	return nil
 }
 
-func parseResponse(metrics string) (map[string]interface{}, error) {
+func parseResponse(metrics string) map[string]interface{} {
 	values := make(map[string]interface{})
 
 	s := strings.Split(metrics, ",")
 
 	for _, metric := range s[:len(s)-1] {
 		m := strings.Split(metric, "=")
+		if len(m) < 2 {
+			continue
+		}
 
 		i, err := strconv.ParseInt(m[1], 10, 64)
 		if err != nil {
-			return values, err
+			log.Printf("E! powerdns: Error parsing integer for metric [%s]: %s",
+				metric, err)
+			continue
 		}
 		values[m[0]] = i
 	}
 
-	return values, nil
+	return values
 }
 
 func init() {
